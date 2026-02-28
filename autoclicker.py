@@ -11,7 +11,6 @@ import os
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
-# Set proper argument/return types for hook functions
 user32.SetWindowsHookExW.argtypes = [
     ctypes.c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD
 ]
@@ -26,6 +25,25 @@ user32.GetMessageW.argtypes = [
     ctypes.POINTER(wintypes.MSG), wintypes.HWND, ctypes.c_uint, ctypes.c_uint
 ]
 
+user32.DefWindowProcW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = ctypes.c_long
+
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID
+]
+user32.CreateWindowExW.restype = wintypes.HWND
+
+user32.SetWindowPos.argtypes = [
+    wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, ctypes.c_uint
+]
+
+user32.SetLayeredWindowAttributes.argtypes = [
+    wintypes.HWND, wintypes.COLORREF, ctypes.c_byte, wintypes.DWORD
+]
+
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
@@ -38,8 +56,8 @@ WM_LBUTTONUP = 0x0202
 WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP = 0x0205
 WM_KEYDOWN = 0x0100
+WM_SYSKEYDOWN = 0x0104
 LLMHF_INJECTED = 0x00000001
-VK_OEM_3 = 0xC0  # ~ (tilde / backtick) key
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
@@ -47,9 +65,33 @@ HOOKPROC = ctypes.CFUNCTYPE(
     ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
 )
 
-KBDLLHOOKPROC = ctypes.CFUNCTYPE(
-    ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
-)
+# Virtual key code -> human-readable name
+VK_NAMES = {
+    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x10: "Shift", 0x11: "Ctrl",
+    0x12: "Alt", 0x13: "Pause", 0x14: "CapsLock", 0x1B: "Esc",
+    0x20: "Space", 0x21: "PgUp", 0x22: "PgDn", 0x23: "End", 0x24: "Home",
+    0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
+    0x2C: "PrtSc", 0x2D: "Insert", 0x2E: "Delete",
+    0x5B: "LWin", 0x5C: "RWin",
+    0x60: "Num0", 0x61: "Num1", 0x62: "Num2", 0x63: "Num3", 0x64: "Num4",
+    0x65: "Num5", 0x66: "Num6", 0x67: "Num7", 0x68: "Num8", 0x69: "Num9",
+    0x6A: "Num*", 0x6B: "Num+", 0x6D: "Num-", 0x6E: "Num.", 0x6F: "Num/",
+    0x70: "F1", 0x71: "F2", 0x72: "F3", 0x73: "F4", 0x74: "F5", 0x75: "F6",
+    0x76: "F7", 0x77: "F8", 0x78: "F9", 0x79: "F10", 0x7A: "F11", 0x7B: "F12",
+    0x90: "NumLock", 0x91: "ScrollLock",
+    0xA0: "LShift", 0xA1: "RShift", 0xA2: "LCtrl", 0xA3: "RCtrl",
+    0xA4: "LAlt", 0xA5: "RAlt",
+    0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
+    0xC0: "~", 0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
+}
+
+
+def vk_to_name(vk):
+    if 0x30 <= vk <= 0x39:
+        return chr(vk)
+    if 0x41 <= vk <= 0x5A:
+        return chr(vk)
+    return VK_NAMES.get(vk, f"0x{vk:02X}")
 
 
 class MSLLHOOKSTRUCT(ctypes.Structure):
@@ -82,33 +124,198 @@ def click_right():
     user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
 
 
-# --- Windows 10 toast notification via PowerShell ---
-def show_notification(title, message):
-    ps_script = (
-        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
-        "ContentType = WindowsRuntime] > $null; "
-        "$template = [Windows.UI.Notifications.ToastNotificationManager]::"
-        "GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
-        "$textNodes = $template.GetElementsByTagName('text'); "
-        f"$textNodes.Item(0).AppendChild($template.CreateTextNode('{title}')) > $null; "
-        f"$textNodes.Item(1).AppendChild($template.CreateTextNode('{message}')) > $null; "
-        "$toast = [Windows.UI.Notifications.ToastNotification]::new($template); "
-        "$toast.ExpirationTime = [DateTimeOffset]::Now.AddSeconds(3); "
-        "$notifier = [Windows.UI.Notifications.ToastNotificationManager]::"
-        "CreateToastNotifier('AUT-CLK'); "
-        "$notifier.Show($toast)"
-    )
-    threading.Thread(
-        target=lambda: os.popen(f'powershell -Command "{ps_script}"'),
-        daemon=True
-    ).start()
+class IndicatorOverlay:
+    """Native Win32 overlay dot — visible on top of fullscreen (borderless) apps."""
+
+    SIZE = 20
+    COLOR_ACTIVE = 0x0050C822    # ARGB: green (#22c850)
+    COLOR_INACTIVE = 0x004444EF  # ARGB: red  (#ef4444)
+
+    # Win32 constants
+    WS_EX_TOPMOST = 0x00000008
+    WS_EX_LAYERED = 0x00080000
+    WS_EX_TRANSPARENT = 0x00000020
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_NOACTIVATE = 0x08000000
+    WS_POPUP = 0x80000000
+    HWND_TOPMOST = -1
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
+    GWL_EXSTYLE = -20
+    LWA_COLORKEY = 0x01
+    LWA_ALPHA = 0x02
+    ULW_ALPHA = 0x02
+    AC_SRC_OVER = 0x00
+    AC_SRC_ALPHA = 0x01
+    DIB_RGB_COLORS = 0
+    BI_RGB = 0
+    CS_VREDRAW = 0x0001
+    CS_HREDRAW = 0x0002
+    IDC_ARROW = 32512
+    WM_DESTROY = 0x0002
+    WM_PAINT = 0x000F
+    SW_SHOWNOACTIVATE = 4
+
+    SW_HIDE = 0
+
+    def __init__(self):
+        self._active = True
+        self._hwnd = None
+        self._visible = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        for _ in range(100):
+            if self._hwnd:
+                break
+            time.sleep(0.01)
+
+    def _run(self):
+        gdi32 = ctypes.windll.gdi32
+
+        WNDPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_long, wintypes.HWND, ctypes.c_uint,
+            wintypes.WPARAM, wintypes.LPARAM
+        )
+
+        class WNDCLASSEXW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint),
+                ("style", ctypes.c_uint),
+                ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int),
+                ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wintypes.HINSTANCE),
+                ("hIcon", wintypes.HICON),
+                ("hCursor", wintypes.HANDLE),
+                ("hbrBackground", wintypes.HANDLE),
+                ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR),
+                ("hIconSm", wintypes.HICON),
+            ]
+
+        def wnd_proc(hwnd, msg, wp, lp):
+            if msg == self.WM_PAINT:
+                self._paint(hwnd)
+                return 0
+            if msg == self.WM_DESTROY:
+                user32.PostQuitMessage(0)
+                return 0
+            return user32.DefWindowProcW(hwnd, msg, wp, lp)
+
+        self._wnd_proc_ref = WNDPROC(wnd_proc)
+
+        hInstance = kernel32.GetModuleHandleW(None)
+        className = "AUTCLK_OVERLAY"
+
+        wc = WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.style = self.CS_HREDRAW | self.CS_VREDRAW
+        wc.lpfnWndProc = self._wnd_proc_ref
+        wc.hInstance = hInstance
+        wc.hCursor = user32.LoadCursorW(None, self.IDC_ARROW)
+        wc.lpszClassName = className
+        user32.RegisterClassExW(ctypes.byref(wc))
+
+        ex_style = (
+            self.WS_EX_TOPMOST | self.WS_EX_LAYERED |
+            self.WS_EX_TRANSPARENT | self.WS_EX_TOOLWINDOW |
+            self.WS_EX_NOACTIVATE
+        )
+
+        dim = self.SIZE
+        self._hwnd = user32.CreateWindowExW(
+            ex_style, className, "AUT-CLK Indicator",
+            self.WS_POPUP,
+            10, 10, dim, dim,
+            None, None, hInstance, None
+        )
+
+        # Set full window as color-keyed on black, so only our painted circle shows
+        user32.SetLayeredWindowAttributes(
+            self._hwnd, 0x00000000, 0, self.LWA_COLORKEY
+        )
+
+        # Start hidden; show() will make it visible
+        self._paint(self._hwnd)
+
+        # Periodically re-raise the overlay to stay on top of fullscreen apps
+        user32.SetTimer(self._hwnd, 1, 500, None)
+
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            # WM_TIMER — re-raise
+            if msg.message == 0x0113:  # WM_TIMER
+                user32.SetWindowPos(
+                    self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
+                    self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+                )
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+    def _paint(self, hwnd):
+        gdi32 = ctypes.windll.gdi32
+
+        class PAINTSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("hdc", wintypes.HDC),
+                ("fErase", wintypes.BOOL),
+                ("rcPaint", wintypes.RECT),
+                ("fRestore", wintypes.BOOL),
+                ("fIncUpdate", wintypes.BOOL),
+                ("rgbReserved", ctypes.c_byte * 32),
+            ]
+
+        ps = PAINTSTRUCT()
+        hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
+
+        # Fill background with black (color key — will be transparent)
+        black_brush = gdi32.CreateSolidBrush(0x00000000)
+        rect = wintypes.RECT(0, 0, self.SIZE, self.SIZE)
+        user32.FillRect(hdc, ctypes.byref(rect), black_brush)
+        gdi32.DeleteObject(black_brush)
+
+        # Draw filled circle
+        color = self.COLOR_ACTIVE if self._active else self.COLOR_INACTIVE
+        brush = gdi32.CreateSolidBrush(color)
+        # Outline pen (darker shade)
+        if self._active:
+            pen = gdi32.CreatePen(0, 2, 0x00346616)   # dark green
+        else:
+            pen = gdi32.CreatePen(0, 2, 0x001B1B99)   # dark red
+        old_brush = gdi32.SelectObject(hdc, brush)
+        old_pen = gdi32.SelectObject(hdc, pen)
+        gdi32.Ellipse(hdc, 0, 0, self.SIZE, self.SIZE)
+        gdi32.SelectObject(hdc, old_brush)
+        gdi32.SelectObject(hdc, old_pen)
+        gdi32.DeleteObject(brush)
+        gdi32.DeleteObject(pen)
+
+        user32.EndPaint(hwnd, ctypes.byref(ps))
+
+    def set_active(self, active):
+        self._active = active
+        if self._hwnd:
+            user32.InvalidateRect(self._hwnd, None, True)
+
+    def show(self):
+        if self._hwnd and not self._visible:
+            self._visible = True
+            user32.ShowWindow(self._hwnd, self.SW_SHOWNOACTIVATE)
+
+    def hide(self):
+        if self._hwnd and self._visible:
+            self._visible = False
+            user32.ShowWindow(self._hwnd, self.SW_HIDE)
+
+    def destroy(self):
+        if self._hwnd:
+            user32.DestroyWindow(self._hwnd)
 
 
 class AutoClicker:
-    DEFAULT_SETTINGS = {
-        "lmb_cps": 20,
-        "rmb_cps": 50,
-    }
+    DEFAULT_TOGGLE_VK = 0xC0  # ~ key
 
     def __init__(self):
         self.lmb_running = False
@@ -118,15 +325,22 @@ class AutoClicker:
         self.lmb_cps = 20
         self.rmb_cps = 50
         self.globally_active = True
+        self.toggle_vk = self.DEFAULT_TOGGLE_VK
+        self.show_indicator = False
+        self._binding_mode = False
 
         self._load_settings()
 
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
-        self.root.geometry("320x350")
+        self.root.geometry("320x400")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self.indicator = IndicatorOverlay()
+        if self.show_indicator:
+            self.indicator.show()
 
         self._build_gui()
         self._start_clicker_threads()
@@ -136,8 +350,10 @@ class AutoClicker:
         try:
             with open(SETTINGS_FILE, "r") as f:
                 s = json.load(f)
-            self.lmb_cps = s.get("lmb_cps", self.DEFAULT_SETTINGS["lmb_cps"])
-            self.rmb_cps = s.get("rmb_cps", self.DEFAULT_SETTINGS["rmb_cps"])
+            self.lmb_cps = s.get("lmb_cps", 20)
+            self.rmb_cps = s.get("rmb_cps", 50)
+            self.toggle_vk = s.get("toggle_vk", self.DEFAULT_TOGGLE_VK)
+            self.show_indicator = s.get("show_indicator", False)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -145,12 +361,15 @@ class AutoClicker:
         s = {
             "lmb_cps": self.lmb_cps,
             "rmb_cps": self.rmb_cps,
+            "toggle_vk": self.toggle_vk,
+            "show_indicator": self.show_indicator,
         }
         with open(SETTINGS_FILE, "w") as f:
             json.dump(s, f, indent=2)
 
     def _on_close(self):
         self._save_settings()
+        self.indicator.destroy()
         self.root.destroy()
 
     def _build_gui(self):
@@ -203,17 +422,65 @@ class AutoClicker:
         self.rmb_btn.pack(side="left")
         ttk.Label(btn_status_r, textvariable=self.rmb_status_var, font=("Segoe UI", 12, "bold")).pack(side="right")
 
+        # --- Hotkey bind section ---
+        bind_frame = ttk.LabelFrame(frame, text="Toggle hotkey", padding=10)
+        bind_frame.pack(fill="x", pady=(0, 8))
+
+        bind_row = ttk.Frame(bind_frame)
+        bind_row.pack(fill="x")
+
+        self.bind_var = tk.StringVar(value=vk_to_name(self.toggle_vk))
+        self.bind_label = ttk.Label(bind_row, textvariable=self.bind_var, font=("Segoe UI", 12, "bold"), width=10, anchor="center")
+        self.bind_label.pack(side="left", padx=(0, 10))
+
+        self.bind_btn = ttk.Button(bind_row, text="Rebind", command=self._start_binding)
+        self.bind_btn.pack(side="left")
+
+        self.bind_hint_var = tk.StringVar(value="")
+        self.bind_hint = ttk.Label(bind_row, textvariable=self.bind_hint_var, foreground="gray")
+        self.bind_hint.pack(side="right")
+
+        # --- Indicator toggle ---
+        self.indicator_var = tk.BooleanVar(value=self.show_indicator)
+        ttk.Checkbutton(
+            frame, text="Show overlay indicator",
+            variable=self.indicator_var, command=self._toggle_indicator
+        ).pack(anchor="w", pady=(4, 0))
+
         # --- Global status & hint ---
-        self.global_status_var = tk.StringVar(value="ACTIVE  [~]")
+        self.global_status_var = tk.StringVar(value="ACTIVE")
         ttk.Label(
             frame, textvariable=self.global_status_var,
             font=("Segoe UI", 11, "bold"), foreground="green"
-        ).pack(pady=(8, 0))
+        ).pack(pady=(6, 0))
 
         ttk.Label(
-            frame, text="Press ~ to toggle  |  Hold button to auto-click",
+            frame, text="Hold mouse button while enabled to auto-click",
             foreground="gray"
         ).pack(pady=(3, 0))
+
+    def _toggle_indicator(self):
+        self.show_indicator = self.indicator_var.get()
+        if self.show_indicator:
+            self.indicator.set_active(self.globally_active)
+            self.indicator.show()
+        else:
+            self.indicator.hide()
+        self._save_settings()
+
+    def _start_binding(self):
+        self._binding_mode = True
+        self.bind_var.set("...")
+        self.bind_hint_var.set("Press any key")
+        self.bind_btn.config(state="disabled")
+
+    def _finish_binding(self, vk):
+        self._binding_mode = False
+        self.toggle_vk = vk
+        self.root.after(0, lambda: self.bind_var.set(vk_to_name(vk)))
+        self.root.after(0, lambda: self.bind_hint_var.set(""))
+        self.root.after(0, lambda: self.bind_btn.config(state="normal"))
+        self._save_settings()
 
     def _on_cps_change(self, which):
         if which == "lmb":
@@ -247,16 +514,15 @@ class AutoClicker:
     def _toggle_global(self):
         self.globally_active = not self.globally_active
         if self.globally_active:
-            self.root.after(0, lambda: self.global_status_var.set("ACTIVE  [~]"))
-            show_notification("AUT-CLK", "Autoclicker ON")
+            self.root.after(0, lambda: self.global_status_var.set("ACTIVE"))
         else:
             self.lmb_running = False
             self.rmb_running = False
-            self.root.after(0, lambda: self.global_status_var.set("PAUSED  [~]"))
-            show_notification("AUT-CLK", "Autoclicker OFF")
+            self.root.after(0, lambda: self.global_status_var.set("PAUSED"))
+        if self.show_indicator:
+            self.root.after(0, lambda: self.indicator.set_active(self.globally_active))
 
     def _install_hooks(self):
-        # --- Mouse hook ---
         def mouse_hook_proc(nCode, wParam, lParam):
             if nCode >= 0 and self.globally_active:
                 info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
@@ -276,16 +542,19 @@ class AutoClicker:
 
         self._mouse_hook_cb = HOOKPROC(mouse_hook_proc)
 
-        # --- Keyboard hook ---
         def kb_hook_proc(nCode, wParam, lParam):
-            if nCode >= 0 and wParam == WM_KEYDOWN:
+            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 info = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                if info.vkCode == VK_OEM_3:
+                vk = info.vkCode
+
+                if self._binding_mode:
+                    self._finish_binding(vk)
+                elif vk == self.toggle_vk:
                     self._toggle_global()
 
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
-        self._kb_hook_cb = KBDLLHOOKPROC(kb_hook_proc)
+        self._kb_hook_cb = HOOKPROC(kb_hook_proc)
 
         def hook_thread():
             user32.SetWindowsHookExW(WH_MOUSE_LL, self._mouse_hook_cb, None, 0)

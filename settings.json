@@ -1,4 +1,6 @@
 {
   "lmb_cps": 20,
-  "rmb_cps": 50
+  "rmb_cps": 50,
+  "toggle_vk": 192,
+  "show_indicator": false
 }
