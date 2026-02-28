@@ -1,0 +1,2 @@
+# No external dependencies required.
+# All modules used (tkinter, ctypes, threading, time) are part of the Python standard library.
