@@ -2,5 +2,12 @@
   "lmb_cps": 20,
   "rmb_cps": 50,
   "toggle_vk": 192,
-  "show_indicator": false
+  "show_indicator": true,
+  "indicator_x": 785,
+  "indicator_y": 1374,
+  "indicator_shape": "line",
+  "indicator_radius": 10,
+  "indicator_line_width": 20,
+  "indicator_line_length": 200,
+  "indicator_blink": true
 }

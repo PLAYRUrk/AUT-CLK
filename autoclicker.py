@@ -127,9 +127,9 @@ def click_right():
 class IndicatorOverlay:
     """Native Win32 overlay dot — visible on top of fullscreen (borderless) apps."""
 
-    SIZE = 20
     COLOR_ACTIVE = 0x0050C822    # ARGB: green (#22c850)
     COLOR_INACTIVE = 0x004444EF  # ARGB: red  (#ef4444)
+    COLOR_INACTIVE_DIM = 0x00222277  # dimmed red for blink-off phase
 
     # Win32 constants
     WS_EX_TOPMOST = 0x00000008
@@ -156,12 +156,22 @@ class IndicatorOverlay:
     IDC_ARROW = 32512
     WM_DESTROY = 0x0002
     WM_PAINT = 0x000F
+    WM_TIMER = 0x0113
     SW_SHOWNOACTIVATE = 4
-
     SW_HIDE = 0
 
-    def __init__(self):
+    def __init__(self, shape="circle", radius=10, line_width=6, line_length=40,
+                 x=10, y=10, blink=True):
+        self._shape = shape
+        self._radius = radius
+        self._line_width = line_width
+        self._line_length = line_length
+        self._pos_x = x
+        self._pos_y = y
+        self._blink = blink
+
         self._active = True
+        self._blink_visible = True
         self._hwnd = None
         self._visible = False
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -171,9 +181,12 @@ class IndicatorOverlay:
                 break
             time.sleep(0.01)
 
-    def _run(self):
-        gdi32 = ctypes.windll.gdi32
+    def _calc_window_size(self):
+        if self._shape == "line":
+            return self._line_length, self._line_width
+        return self._radius * 2, self._radius * 2
 
+    def _run(self):
         WNDPROC = ctypes.WINFUNCTYPE(
             ctypes.c_long, wintypes.HWND, ctypes.c_uint,
             wintypes.WPARAM, wintypes.LPARAM
@@ -198,6 +211,19 @@ class IndicatorOverlay:
         def wnd_proc(hwnd, msg, wp, lp):
             if msg == self.WM_PAINT:
                 self._paint(hwnd)
+                return 0
+            if msg == self.WM_TIMER:
+                if wp == 1:
+                    # Re-raise to stay on top
+                    user32.SetWindowPos(
+                        self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
+                        self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+                    )
+                elif wp == 2:
+                    # Blink timer
+                    if not self._active and self._blink:
+                        self._blink_visible = not self._blink_visible
+                        user32.InvalidateRect(self._hwnd, None, True)
                 return 0
             if msg == self.WM_DESTROY:
                 user32.PostQuitMessage(0)
@@ -224,33 +250,28 @@ class IndicatorOverlay:
             self.WS_EX_NOACTIVATE
         )
 
-        dim = self.SIZE
+        w, h = self._calc_window_size()
         self._hwnd = user32.CreateWindowExW(
             ex_style, className, "AUT-CLK Indicator",
             self.WS_POPUP,
-            10, 10, dim, dim,
+            self._pos_x, self._pos_y, w, h,
             None, None, hInstance, None
         )
 
-        # Set full window as color-keyed on black, so only our painted circle shows
+        # Set full window as color-keyed on black, so only our painted shape shows
         user32.SetLayeredWindowAttributes(
             self._hwnd, 0x00000000, 0, self.LWA_COLORKEY
         )
 
-        # Start hidden; show() will make it visible
         self._paint(self._hwnd)
 
-        # Periodically re-raise the overlay to stay on top of fullscreen apps
+        # Timer 1: re-raise overlay every 500ms
         user32.SetTimer(self._hwnd, 1, 500, None)
+        # Timer 2: blink every 400ms
+        user32.SetTimer(self._hwnd, 2, 400, None)
 
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            # WM_TIMER — re-raise
-            if msg.message == 0x0113:  # WM_TIMER
-                user32.SetWindowPos(
-                    self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
-                    self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
-                )
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
@@ -267,26 +288,39 @@ class IndicatorOverlay:
                 ("rgbReserved", ctypes.c_byte * 32),
             ]
 
+        w, h = self._calc_window_size()
+
         ps = PAINTSTRUCT()
         hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
 
         # Fill background with black (color key — will be transparent)
         black_brush = gdi32.CreateSolidBrush(0x00000000)
-        rect = wintypes.RECT(0, 0, self.SIZE, self.SIZE)
+        rect = wintypes.RECT(0, 0, w, h)
         user32.FillRect(hdc, ctypes.byref(rect), black_brush)
         gdi32.DeleteObject(black_brush)
 
-        # Draw filled circle
-        color = self.COLOR_ACTIVE if self._active else self.COLOR_INACTIVE
-        brush = gdi32.CreateSolidBrush(color)
-        # Outline pen (darker shade)
+        # Determine color
         if self._active:
-            pen = gdi32.CreatePen(0, 2, 0x00346616)   # dark green
+            color = self.COLOR_ACTIVE
+            pen_color = 0x00346616  # dark green
         else:
-            pen = gdi32.CreatePen(0, 2, 0x001B1B99)   # dark red
+            if self._blink and not self._blink_visible:
+                color = self.COLOR_INACTIVE_DIM
+                pen_color = 0x00111155  # very dark red
+            else:
+                color = self.COLOR_INACTIVE
+                pen_color = 0x001B1B99  # dark red
+
+        brush = gdi32.CreateSolidBrush(color)
+        pen = gdi32.CreatePen(0, 2, pen_color)
         old_brush = gdi32.SelectObject(hdc, brush)
         old_pen = gdi32.SelectObject(hdc, pen)
-        gdi32.Ellipse(hdc, 0, 0, self.SIZE, self.SIZE)
+
+        if self._shape == "line":
+            gdi32.Rectangle(hdc, 0, 0, w, h)
+        else:
+            gdi32.Ellipse(hdc, 0, 0, w, h)
+
         gdi32.SelectObject(hdc, old_brush)
         gdi32.SelectObject(hdc, old_pen)
         gdi32.DeleteObject(brush)
@@ -296,7 +330,44 @@ class IndicatorOverlay:
 
     def set_active(self, active):
         self._active = active
+        if active:
+            self._blink_visible = True
         if self._hwnd:
+            user32.InvalidateRect(self._hwnd, None, True)
+
+    def set_position(self, x, y):
+        self._pos_x = x
+        self._pos_y = y
+        if self._hwnd:
+            w, h = self._calc_window_size()
+            user32.SetWindowPos(
+                self._hwnd, self.HWND_TOPMOST, x, y, w, h,
+                self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+            )
+
+    def update_config(self, shape=None, radius=None, line_width=None,
+                      line_length=None, x=None, y=None, blink=None):
+        if shape is not None:
+            self._shape = shape
+        if radius is not None:
+            self._radius = radius
+        if line_width is not None:
+            self._line_width = line_width
+        if line_length is not None:
+            self._line_length = line_length
+        if x is not None:
+            self._pos_x = x
+        if y is not None:
+            self._pos_y = y
+        if blink is not None:
+            self._blink = blink
+        if self._hwnd:
+            w, h = self._calc_window_size()
+            user32.SetWindowPos(
+                self._hwnd, self.HWND_TOPMOST,
+                self._pos_x, self._pos_y, w, h,
+                self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+            )
             user32.InvalidateRect(self._hwnd, None, True)
 
     def show(self):
@@ -329,16 +400,33 @@ class AutoClicker:
         self.show_indicator = False
         self._binding_mode = False
 
+        # Indicator settings
+        self.indicator_x = 10
+        self.indicator_y = 10
+        self.indicator_shape = "circle"
+        self.indicator_radius = 10
+        self.indicator_line_width = 6
+        self.indicator_line_length = 40
+        self.indicator_blink = True
+
         self._load_settings()
 
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
-        self.root.geometry("320x400")
+        self.root.geometry("320x620")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.indicator = IndicatorOverlay()
+        self.indicator = IndicatorOverlay(
+            shape=self.indicator_shape,
+            radius=self.indicator_radius,
+            line_width=self.indicator_line_width,
+            line_length=self.indicator_line_length,
+            x=self.indicator_x,
+            y=self.indicator_y,
+            blink=self.indicator_blink,
+        )
         if self.show_indicator:
             self.indicator.show()
 
@@ -354,6 +442,13 @@ class AutoClicker:
             self.rmb_cps = s.get("rmb_cps", 50)
             self.toggle_vk = s.get("toggle_vk", self.DEFAULT_TOGGLE_VK)
             self.show_indicator = s.get("show_indicator", False)
+            self.indicator_x = s.get("indicator_x", 10)
+            self.indicator_y = s.get("indicator_y", 10)
+            self.indicator_shape = s.get("indicator_shape", "circle")
+            self.indicator_radius = s.get("indicator_radius", 10)
+            self.indicator_line_width = s.get("indicator_line_width", 6)
+            self.indicator_line_length = s.get("indicator_line_length", 40)
+            self.indicator_blink = s.get("indicator_blink", True)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -363,6 +458,13 @@ class AutoClicker:
             "rmb_cps": self.rmb_cps,
             "toggle_vk": self.toggle_vk,
             "show_indicator": self.show_indicator,
+            "indicator_x": self.indicator_x,
+            "indicator_y": self.indicator_y,
+            "indicator_shape": self.indicator_shape,
+            "indicator_radius": self.indicator_radius,
+            "indicator_line_width": self.indicator_line_width,
+            "indicator_line_length": self.indicator_line_length,
+            "indicator_blink": self.indicator_blink,
         }
         with open(SETTINGS_FILE, "w") as f:
             json.dump(s, f, indent=2)
@@ -447,6 +549,98 @@ class AutoClicker:
             variable=self.indicator_var, command=self._toggle_indicator
         ).pack(anchor="w", pady=(4, 0))
 
+        # --- Indicator settings ---
+        self.ind_settings_frame = ttk.LabelFrame(frame, text="Indicator settings", padding=8)
+        self.ind_settings_frame.pack(fill="x", pady=(4, 4))
+
+        # Shape radio buttons
+        shape_row = ttk.Frame(self.ind_settings_frame)
+        shape_row.pack(fill="x")
+        ttk.Label(shape_row, text="Shape:").pack(side="left")
+        self.shape_var = tk.StringVar(value=self.indicator_shape)
+        ttk.Radiobutton(shape_row, text="Circle", variable=self.shape_var,
+                        value="circle", command=self._on_shape_change).pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(shape_row, text="Line", variable=self.shape_var,
+                        value="line", command=self._on_shape_change).pack(side="left", padx=(8, 0))
+
+        # Radius (for circle)
+        self.radius_frame = ttk.Frame(self.ind_settings_frame)
+        self.radius_frame.pack(fill="x", pady=(4, 0))
+        ttk.Label(self.radius_frame, text="Radius:").pack(side="left")
+        self.radius_var = tk.IntVar(value=self.indicator_radius)
+        self.radius_scale = ttk.Scale(
+            self.radius_frame, from_=5, to=50, variable=self.radius_var,
+            orient="horizontal", command=lambda _: self._on_indicator_param_change()
+        )
+        self.radius_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.radius_label = ttk.Label(self.radius_frame, text=str(self.indicator_radius), width=4)
+        self.radius_label.pack(side="right")
+
+        # Line width (for line)
+        self.lw_frame = ttk.Frame(self.ind_settings_frame)
+        self.lw_frame.pack(fill="x", pady=(4, 0))
+        ttk.Label(self.lw_frame, text="Line W:").pack(side="left")
+        self.lw_var = tk.IntVar(value=self.indicator_line_width)
+        self.lw_scale = ttk.Scale(
+            self.lw_frame, from_=2, to=20, variable=self.lw_var,
+            orient="horizontal", command=lambda _: self._on_indicator_param_change()
+        )
+        self.lw_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.lw_label = ttk.Label(self.lw_frame, text=str(self.indicator_line_width), width=4)
+        self.lw_label.pack(side="right")
+
+        # Line length (for line)
+        self.ll_frame = ttk.Frame(self.ind_settings_frame)
+        self.ll_frame.pack(fill="x", pady=(4, 0))
+        ttk.Label(self.ll_frame, text="Line L:").pack(side="left")
+        self.ll_var = tk.IntVar(value=self.indicator_line_length)
+        self.ll_scale = ttk.Scale(
+            self.ll_frame, from_=10, to=200, variable=self.ll_var,
+            orient="horizontal", command=lambda _: self._on_indicator_param_change()
+        )
+        self.ll_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.ll_label = ttk.Label(self.ll_frame, text=str(self.indicator_line_length), width=4)
+        self.ll_label.pack(side="right")
+
+        # Position X
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+
+        pos_x_row = ttk.Frame(self.ind_settings_frame)
+        pos_x_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(pos_x_row, text="Pos X:").pack(side="left")
+        self.pos_x_var = tk.IntVar(value=self.indicator_x)
+        self.pos_x_scale = ttk.Scale(
+            pos_x_row, from_=0, to=screen_w, variable=self.pos_x_var,
+            orient="horizontal", command=lambda _: self._on_indicator_param_change()
+        )
+        self.pos_x_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.pos_x_label = ttk.Label(pos_x_row, text=str(self.indicator_x), width=5)
+        self.pos_x_label.pack(side="right")
+
+        # Position Y
+        pos_y_row = ttk.Frame(self.ind_settings_frame)
+        pos_y_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(pos_y_row, text="Pos Y:").pack(side="left")
+        self.pos_y_var = tk.IntVar(value=self.indicator_y)
+        self.pos_y_scale = ttk.Scale(
+            pos_y_row, from_=0, to=screen_h, variable=self.pos_y_var,
+            orient="horizontal", command=lambda _: self._on_indicator_param_change()
+        )
+        self.pos_y_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.pos_y_label = ttk.Label(pos_y_row, text=str(self.indicator_y), width=5)
+        self.pos_y_label.pack(side="right")
+
+        # Blink checkbox
+        self.blink_var = tk.BooleanVar(value=self.indicator_blink)
+        ttk.Checkbutton(
+            self.ind_settings_frame, text="Blink when inactive",
+            variable=self.blink_var, command=self._on_indicator_param_change
+        ).pack(anchor="w", pady=(4, 0))
+
+        # Show/hide shape-specific widgets
+        self._update_shape_widgets()
+
         # --- Global status & hint ---
         self.global_status_var = tk.StringVar(value="ACTIVE")
         ttk.Label(
@@ -466,6 +660,49 @@ class AutoClicker:
             self.indicator.show()
         else:
             self.indicator.hide()
+        self._save_settings()
+
+    def _on_shape_change(self):
+        self.indicator_shape = self.shape_var.get()
+        self._update_shape_widgets()
+        self._on_indicator_param_change()
+
+    def _update_shape_widgets(self):
+        if self.indicator_shape == "circle":
+            self.radius_frame.pack(fill="x", pady=(4, 0))
+            self.lw_frame.pack_forget()
+            self.ll_frame.pack_forget()
+        else:
+            self.radius_frame.pack_forget()
+            self.lw_frame.pack(fill="x", pady=(4, 0))
+            self.ll_frame.pack(fill="x", pady=(4, 0))
+
+    def _on_indicator_param_change(self):
+        self.indicator_radius = max(5, int(float(self.radius_var.get())))
+        self.indicator_line_width = max(2, int(float(self.lw_var.get())))
+        self.indicator_line_length = max(10, int(float(self.ll_var.get())))
+        self.indicator_x = max(0, int(float(self.pos_x_var.get())))
+        self.indicator_y = max(0, int(float(self.pos_y_var.get())))
+        self.indicator_blink = self.blink_var.get()
+        self.indicator_shape = self.shape_var.get()
+
+        # Update labels
+        self.radius_label.config(text=str(self.indicator_radius))
+        self.lw_label.config(text=str(self.indicator_line_width))
+        self.ll_label.config(text=str(self.indicator_line_length))
+        self.pos_x_label.config(text=str(self.indicator_x))
+        self.pos_y_label.config(text=str(self.indicator_y))
+
+        # Update indicator on the fly
+        self.indicator.update_config(
+            shape=self.indicator_shape,
+            radius=self.indicator_radius,
+            line_width=self.indicator_line_width,
+            line_length=self.indicator_line_length,
+            x=self.indicator_x,
+            y=self.indicator_y,
+            blink=self.indicator_blink,
+        )
         self._save_settings()
 
     def _start_binding(self):
