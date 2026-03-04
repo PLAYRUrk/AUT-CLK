@@ -1,13 +1,14 @@
 {
-  "lmb_cps": 20,
+  "lmb_cps": 35,
   "rmb_cps": 50,
-  "toggle_vk": 192,
+  "toggle_vk": 164,
   "show_indicator": true,
-  "indicator_x": 785,
-  "indicator_y": 1374,
+  "indicator_x": 1090,
+  "indicator_y": 1284,
   "indicator_shape": "line",
   "indicator_radius": 10,
   "indicator_line_width": 20,
-  "indicator_line_length": 200,
-  "indicator_blink": true
+  "indicator_line_length": 176,
+  "indicator_blink": true,
+  "indicator_text_size": 35
 }

@@ -11,6 +11,15 @@ import os
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# DPI awareness — ensures correct positioning on scaled displays & helps with fullscreen overlay
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor DPI Aware
+except (AttributeError, OSError):
+    try:
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
 user32.SetWindowsHookExW.argtypes = [
     ctypes.c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD
 ]
@@ -161,7 +170,7 @@ class IndicatorOverlay:
     SW_HIDE = 0
 
     def __init__(self, shape="circle", radius=10, line_width=6, line_length=40,
-                 x=10, y=10, blink=True):
+                 x=10, y=10, blink=True, text_size=16):
         self._shape = shape
         self._radius = radius
         self._line_width = line_width
@@ -169,6 +178,7 @@ class IndicatorOverlay:
         self._pos_x = x
         self._pos_y = y
         self._blink = blink
+        self._text_size = text_size
 
         self._active = True
         self._blink_visible = True
@@ -184,6 +194,15 @@ class IndicatorOverlay:
     def _calc_window_size(self):
         if self._shape == "line":
             return self._line_length, self._line_width
+        if self._shape == "text":
+            # Base raster size of Terminal font (always rendered at this size, then scaled)
+            base_h = 12
+            base_char_w = 8
+            base_w = base_char_w * 7  # 7 chars ("NOT RDY")
+            scale = self._text_size / base_h
+            w = int(base_w * scale) + 2
+            h = int(base_h * scale) + 2
+            return w, h
         return self._radius * 2, self._radius * 2
 
     def _run(self):
@@ -214,11 +233,12 @@ class IndicatorOverlay:
                 return 0
             if msg == self.WM_TIMER:
                 if wp == 1:
-                    # Re-raise to stay on top
-                    user32.SetWindowPos(
-                        self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
-                        self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
-                    )
+                    # Re-raise to stay on top (only when visible)
+                    if self._visible:
+                        user32.SetWindowPos(
+                            self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
+                            self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+                        )
                 elif wp == 2:
                     # Blink timer
                     if not self._active and self._blink:
@@ -318,6 +338,58 @@ class IndicatorOverlay:
 
         if self._shape == "line":
             gdi32.Rectangle(hdc, 0, 0, w, h)
+        elif self._shape == "text":
+            # Render text at fixed base size with bitmap Terminal font,
+            # then scale up with nearest-neighbor to keep the pixel look.
+            base_h = 12
+            base_char_w = 8
+            base_w = base_char_w * 7  # 7 chars max
+
+            text = "ARMED" if self._active else "NOT RDY"
+            txt_color = color
+            if not self._active and self._blink and not self._blink_visible:
+                txt_color = self.COLOR_INACTIVE_DIM
+
+            # Create off-screen DC at base size
+            mem_dc = gdi32.CreateCompatibleDC(hdc)
+            mem_bmp = gdi32.CreateCompatibleBitmap(hdc, base_w, base_h)
+            old_bmp = gdi32.SelectObject(mem_dc, mem_bmp)
+
+            # Fill with black (will become transparent via color key)
+            bg_brush = gdi32.CreateSolidBrush(0x00000000)
+            base_rect = wintypes.RECT(0, 0, base_w, base_h)
+            user32.FillRect(mem_dc, ctypes.byref(base_rect), bg_brush)
+            gdi32.DeleteObject(bg_brush)
+
+            # Create Small Fonts at its native raster size (clean minimal pixel font)
+            font = gdi32.CreateFontW(
+                base_h, 0, 0, 0, 400,  # normal weight
+                0, 0, 0,
+                0,  # DEFAULT_CHARSET
+                0, 0, 0,
+                0x30,  # FF_MODERN | FIXED_PITCH
+                "Small Fonts"
+            )
+            old_font = gdi32.SelectObject(mem_dc, font)
+            gdi32.SetBkMode(mem_dc, 1)  # TRANSPARENT
+            gdi32.SetTextColor(mem_dc, txt_color)
+            user32.DrawTextW(mem_dc, text, -1, ctypes.byref(base_rect),
+                             0x0025)  # DT_CENTER | DT_VCENTER | DT_SINGLELINE
+
+            # Scale to target size with nearest-neighbor (keeps pixels sharp)
+            gdi32.SetStretchBltMode(hdc, 3)  # COLORONCOLOR — no smoothing
+            gdi32.StretchBlt(
+                hdc, 0, 0, w, h,
+                mem_dc, 0, 0, base_w, base_h,
+                0x00CC0020  # SRCCOPY
+            )
+
+            # Cleanup
+            gdi32.SelectObject(mem_dc, old_font)
+            gdi32.DeleteObject(font)
+            gdi32.SelectObject(mem_dc, old_bmp)
+            gdi32.DeleteObject(mem_bmp)
+            gdi32.DeleteDC(mem_dc)
         else:
             gdi32.Ellipse(hdc, 0, 0, w, h)
 
@@ -340,13 +412,16 @@ class IndicatorOverlay:
         self._pos_y = y
         if self._hwnd:
             w, h = self._calc_window_size()
+            flags = self.SWP_NOACTIVATE
+            if self._visible:
+                flags |= self.SWP_SHOWWINDOW
             user32.SetWindowPos(
                 self._hwnd, self.HWND_TOPMOST, x, y, w, h,
-                self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+                flags
             )
 
     def update_config(self, shape=None, radius=None, line_width=None,
-                      line_length=None, x=None, y=None, blink=None):
+                      line_length=None, x=None, y=None, blink=None, text_size=None):
         if shape is not None:
             self._shape = shape
         if radius is not None:
@@ -361,12 +436,17 @@ class IndicatorOverlay:
             self._pos_y = y
         if blink is not None:
             self._blink = blink
+        if text_size is not None:
+            self._text_size = text_size
         if self._hwnd:
             w, h = self._calc_window_size()
+            flags = self.SWP_NOACTIVATE
+            if self._visible:
+                flags |= self.SWP_SHOWWINDOW
             user32.SetWindowPos(
                 self._hwnd, self.HWND_TOPMOST,
                 self._pos_x, self._pos_y, w, h,
-                self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+                flags
             )
             user32.InvalidateRect(self._hwnd, None, True)
 
@@ -408,12 +488,13 @@ class AutoClicker:
         self.indicator_line_width = 6
         self.indicator_line_length = 40
         self.indicator_blink = True
+        self.indicator_text_size = 16
 
         self._load_settings()
 
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
-        self.root.geometry("320x620")
+        self.root.geometry("320x640")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -426,6 +507,7 @@ class AutoClicker:
             x=self.indicator_x,
             y=self.indicator_y,
             blink=self.indicator_blink,
+            text_size=self.indicator_text_size,
         )
         if self.show_indicator:
             self.indicator.show()
@@ -449,6 +531,7 @@ class AutoClicker:
             self.indicator_line_width = s.get("indicator_line_width", 6)
             self.indicator_line_length = s.get("indicator_line_length", 40)
             self.indicator_blink = s.get("indicator_blink", True)
+            self.indicator_text_size = s.get("indicator_text_size", 16)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -465,6 +548,7 @@ class AutoClicker:
             "indicator_line_width": self.indicator_line_width,
             "indicator_line_length": self.indicator_line_length,
             "indicator_blink": self.indicator_blink,
+            "indicator_text_size": self.indicator_text_size,
         }
         with open(SETTINGS_FILE, "w") as f:
             json.dump(s, f, indent=2)
@@ -562,6 +646,8 @@ class AutoClicker:
                         value="circle", command=self._on_shape_change).pack(side="left", padx=(8, 0))
         ttk.Radiobutton(shape_row, text="Line", variable=self.shape_var,
                         value="line", command=self._on_shape_change).pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(shape_row, text="Text", variable=self.shape_var,
+                        value="text", command=self._on_shape_change).pack(side="left", padx=(8, 0))
 
         # Radius (for circle)
         self.radius_frame = ttk.Frame(self.ind_settings_frame)
@@ -601,6 +687,19 @@ class AutoClicker:
         self.ll_scale.pack(side="left", fill="x", expand=True, padx=5)
         self.ll_label = ttk.Label(self.ll_frame, text=str(self.indicator_line_length), width=4)
         self.ll_label.pack(side="right")
+
+        # Text size (for text)
+        self.ts_frame = ttk.Frame(self.ind_settings_frame)
+        self.ts_frame.pack(fill="x", pady=(4, 0))
+        ttk.Label(self.ts_frame, text="Size:").pack(side="left")
+        self.ts_var = tk.IntVar(value=self.indicator_text_size)
+        self.ts_scale = ttk.Scale(
+            self.ts_frame, from_=8, to=72, variable=self.ts_var,
+            orient="horizontal", command=lambda _: self._on_indicator_param_change()
+        )
+        self.ts_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.ts_label = ttk.Label(self.ts_frame, text=str(self.indicator_text_size), width=4)
+        self.ts_label.pack(side="right")
 
         # Position X
         screen_w = self.root.winfo_screenwidth()
@@ -672,10 +771,17 @@ class AutoClicker:
             self.radius_frame.pack(fill="x", pady=(4, 0))
             self.lw_frame.pack_forget()
             self.ll_frame.pack_forget()
-        else:
+            self.ts_frame.pack_forget()
+        elif self.indicator_shape == "line":
             self.radius_frame.pack_forget()
             self.lw_frame.pack(fill="x", pady=(4, 0))
             self.ll_frame.pack(fill="x", pady=(4, 0))
+            self.ts_frame.pack_forget()
+        else:  # text
+            self.radius_frame.pack_forget()
+            self.lw_frame.pack_forget()
+            self.ll_frame.pack_forget()
+            self.ts_frame.pack(fill="x", pady=(4, 0))
 
     def _on_indicator_param_change(self):
         self.indicator_radius = max(5, int(float(self.radius_var.get())))
@@ -685,11 +791,13 @@ class AutoClicker:
         self.indicator_y = max(0, int(float(self.pos_y_var.get())))
         self.indicator_blink = self.blink_var.get()
         self.indicator_shape = self.shape_var.get()
+        self.indicator_text_size = max(8, int(float(self.ts_var.get())))
 
         # Update labels
         self.radius_label.config(text=str(self.indicator_radius))
         self.lw_label.config(text=str(self.indicator_line_width))
         self.ll_label.config(text=str(self.indicator_line_length))
+        self.ts_label.config(text=str(self.indicator_text_size))
         self.pos_x_label.config(text=str(self.indicator_x))
         self.pos_y_label.config(text=str(self.indicator_y))
 
@@ -702,6 +810,7 @@ class AutoClicker:
             x=self.indicator_x,
             y=self.indicator_y,
             blink=self.indicator_blink,
+            text_size=self.indicator_text_size,
         )
         self._save_settings()
 
