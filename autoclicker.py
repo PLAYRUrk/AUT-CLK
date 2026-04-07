@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk
 import json
 import os
+import random
 
 # Windows API
 user32 = ctypes.windll.user32
@@ -468,6 +469,14 @@ class IndicatorOverlay:
 class AutoClicker:
     DEFAULT_TOGGLE_VK = 0xC0  # ~ key
 
+    # Presets: (name, min_cps, max_cps, jitter_ms)
+    LMB_PRESETS = {
+        "Sword PvP": (10, 15, 15),
+        "Block Break": (18, 20, 5),
+        "Bridge": (6, 8, 20),
+        "Custom": None,
+    }
+
     def __init__(self):
         self.lmb_running = False
         self.rmb_running = False
@@ -479,6 +488,13 @@ class AutoClicker:
         self.toggle_vk = self.DEFAULT_TOGGLE_VK
         self.show_indicator = False
         self._binding_mode = False
+
+        # Smart LMB settings
+        self.lmb_smart = False
+        self.lmb_min_cps = 10
+        self.lmb_max_cps = 15
+        self.lmb_jitter_ms = 15
+        self.lmb_preset = "Custom"
 
         # Indicator settings
         self.indicator_x = 10
@@ -494,7 +510,7 @@ class AutoClicker:
 
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
-        self.root.geometry("320x640")
+        self.root.geometry("320x740")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -523,6 +539,11 @@ class AutoClicker:
             self.lmb_cps = s.get("lmb_cps", 20)
             self.rmb_cps = s.get("rmb_cps", 50)
             self.toggle_vk = s.get("toggle_vk", self.DEFAULT_TOGGLE_VK)
+            self.lmb_smart = s.get("lmb_smart", False)
+            self.lmb_min_cps = s.get("lmb_min_cps", 10)
+            self.lmb_max_cps = s.get("lmb_max_cps", 15)
+            self.lmb_jitter_ms = s.get("lmb_jitter_ms", 15)
+            self.lmb_preset = s.get("lmb_preset", "Custom")
             self.show_indicator = s.get("show_indicator", False)
             self.indicator_x = s.get("indicator_x", 10)
             self.indicator_y = s.get("indicator_y", 10)
@@ -540,6 +561,11 @@ class AutoClicker:
             "lmb_cps": self.lmb_cps,
             "rmb_cps": self.rmb_cps,
             "toggle_vk": self.toggle_vk,
+            "lmb_smart": self.lmb_smart,
+            "lmb_min_cps": self.lmb_min_cps,
+            "lmb_max_cps": self.lmb_max_cps,
+            "lmb_jitter_ms": self.lmb_jitter_ms,
+            "lmb_preset": self.lmb_preset,
             "show_indicator": self.show_indicator,
             "indicator_x": self.indicator_x,
             "indicator_y": self.indicator_y,
@@ -566,7 +592,16 @@ class AutoClicker:
         lmb_frame = ttk.LabelFrame(frame, text="LMB Auto-Click", padding=10)
         lmb_frame.pack(fill="x", pady=(0, 8))
 
-        cps_frame_l = ttk.Frame(lmb_frame)
+        # Smart mode toggle
+        self.lmb_smart_var = tk.BooleanVar(value=self.lmb_smart)
+        ttk.Checkbutton(
+            lmb_frame, text="Smart mode (range + jitter)",
+            variable=self.lmb_smart_var, command=self._on_smart_toggle
+        ).pack(anchor="w")
+
+        # --- Fixed CPS (shown when smart=off) ---
+        self.lmb_fixed_frame = ttk.Frame(lmb_frame)
+        cps_frame_l = ttk.Frame(self.lmb_fixed_frame)
         cps_frame_l.pack(fill="x")
         ttk.Label(cps_frame_l, text="CPS:").pack(side="left")
         self.lmb_cps_var = tk.IntVar(value=self.lmb_cps)
@@ -577,6 +612,63 @@ class AutoClicker:
         self.lmb_scale.pack(side="left", fill="x", expand=True, padx=5)
         self.lmb_cps_label = ttk.Label(cps_frame_l, text=str(self.lmb_cps), width=4)
         self.lmb_cps_label.pack(side="right")
+
+        # --- Smart CPS (shown when smart=on) ---
+        self.lmb_smart_frame = ttk.Frame(lmb_frame)
+
+        # Presets row
+        preset_row = ttk.Frame(self.lmb_smart_frame)
+        preset_row.pack(fill="x", pady=(2, 4))
+        ttk.Label(preset_row, text="Preset:").pack(side="left")
+        self.lmb_preset_var = tk.StringVar(value=self.lmb_preset)
+        preset_combo = ttk.Combobox(
+            preset_row, textvariable=self.lmb_preset_var,
+            values=list(self.LMB_PRESETS.keys()), state="readonly", width=12
+        )
+        preset_combo.pack(side="left", padx=5)
+        preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
+
+        # Min CPS
+        min_row = ttk.Frame(self.lmb_smart_frame)
+        min_row.pack(fill="x")
+        ttk.Label(min_row, text="Min CPS:").pack(side="left")
+        self.lmb_min_var = tk.IntVar(value=self.lmb_min_cps)
+        self.lmb_min_scale = ttk.Scale(
+            min_row, from_=1, to=25, variable=self.lmb_min_var,
+            orient="horizontal", command=lambda _: self._on_smart_param_change()
+        )
+        self.lmb_min_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.lmb_min_label = ttk.Label(min_row, text=str(self.lmb_min_cps), width=3)
+        self.lmb_min_label.pack(side="right")
+
+        # Max CPS
+        max_row = ttk.Frame(self.lmb_smart_frame)
+        max_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(max_row, text="Max CPS:").pack(side="left")
+        self.lmb_max_var = tk.IntVar(value=self.lmb_max_cps)
+        self.lmb_max_scale = ttk.Scale(
+            max_row, from_=1, to=25, variable=self.lmb_max_var,
+            orient="horizontal", command=lambda _: self._on_smart_param_change()
+        )
+        self.lmb_max_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.lmb_max_label = ttk.Label(max_row, text=str(self.lmb_max_cps), width=3)
+        self.lmb_max_label.pack(side="right")
+
+        # Jitter
+        jitter_row = ttk.Frame(self.lmb_smart_frame)
+        jitter_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(jitter_row, text="Jitter ms:").pack(side="left")
+        self.lmb_jitter_var = tk.IntVar(value=self.lmb_jitter_ms)
+        self.lmb_jitter_scale = ttk.Scale(
+            jitter_row, from_=0, to=50, variable=self.lmb_jitter_var,
+            orient="horizontal", command=lambda _: self._on_smart_param_change()
+        )
+        self.lmb_jitter_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.lmb_jitter_label = ttk.Label(jitter_row, text=str(self.lmb_jitter_ms), width=3)
+        self.lmb_jitter_label.pack(side="right")
+
+        # Show correct frame
+        self._update_lmb_mode_widgets()
 
         btn_status_l = ttk.Frame(lmb_frame)
         btn_status_l.pack(fill="x", pady=(5, 0))
@@ -828,6 +920,52 @@ class AutoClicker:
         self.root.after(0, lambda: self.bind_btn.config(state="normal"))
         self._save_settings()
 
+    def _update_lmb_mode_widgets(self):
+        if self.lmb_smart:
+            self.lmb_fixed_frame.pack_forget()
+            self.lmb_smart_frame.pack(fill="x", pady=(2, 0))
+        else:
+            self.lmb_smart_frame.pack_forget()
+            self.lmb_fixed_frame.pack(fill="x", pady=(2, 0))
+
+    def _on_smart_toggle(self):
+        self.lmb_smart = self.lmb_smart_var.get()
+        self._update_lmb_mode_widgets()
+        self._save_settings()
+
+    def _on_preset_change(self, event=None):
+        name = self.lmb_preset_var.get()
+        self.lmb_preset = name
+        preset = self.LMB_PRESETS.get(name)
+        if preset is not None:
+            mn, mx, jt = preset
+            self.lmb_min_cps = mn
+            self.lmb_max_cps = mx
+            self.lmb_jitter_ms = jt
+            self.lmb_min_var.set(mn)
+            self.lmb_max_var.set(mx)
+            self.lmb_jitter_var.set(jt)
+            self.lmb_min_label.config(text=str(mn))
+            self.lmb_max_label.config(text=str(mx))
+            self.lmb_jitter_label.config(text=str(jt))
+        self._save_settings()
+
+    def _on_smart_param_change(self):
+        self.lmb_min_cps = max(1, int(float(self.lmb_min_var.get())))
+        self.lmb_max_cps = max(1, int(float(self.lmb_max_var.get())))
+        self.lmb_jitter_ms = max(0, int(float(self.lmb_jitter_var.get())))
+        # Ensure min <= max
+        if self.lmb_min_cps > self.lmb_max_cps:
+            self.lmb_max_cps = self.lmb_min_cps
+            self.lmb_max_var.set(self.lmb_max_cps)
+        self.lmb_min_label.config(text=str(self.lmb_min_cps))
+        self.lmb_max_label.config(text=str(self.lmb_max_cps))
+        self.lmb_jitter_label.config(text=str(self.lmb_jitter_ms))
+        # Switch to Custom preset when user manually adjusts
+        self.lmb_preset = "Custom"
+        self.lmb_preset_var.set("Custom")
+        self._save_settings()
+
     def _on_cps_change(self, which):
         if which == "lmb":
             self.lmb_cps = max(1, int(float(self.lmb_cps_var.get())))
@@ -918,7 +1056,16 @@ class AutoClicker:
             while True:
                 if self.lmb_running and self.lmb_enabled and self.globally_active:
                     click_left()
-                    time.sleep(1.0 / self.lmb_cps)
+                    if self.lmb_smart:
+                        # Pick random CPS within the range
+                        cps = random.uniform(self.lmb_min_cps, max(self.lmb_min_cps, self.lmb_max_cps))
+                        base_delay = 1.0 / cps
+                        # Add jitter: random offset in [-jitter, +jitter]
+                        jitter = random.uniform(-self.lmb_jitter_ms, self.lmb_jitter_ms) / 1000.0
+                        delay = max(0.01, base_delay + jitter)
+                    else:
+                        delay = 1.0 / self.lmb_cps
+                    time.sleep(delay)
                 else:
                     time.sleep(0.005)
 
