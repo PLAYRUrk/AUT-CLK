@@ -7,6 +7,7 @@ from tkinter import ttk
 import json
 import os
 import random
+import socket as _socket
 import sys
 
 # Windows API
@@ -170,6 +171,123 @@ def click_left():
 def click_right():
     user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
     user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+
+
+class ControlBridge:
+    """Local TCP bridge for external clicker control."""
+
+    PORT = 25566
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._conn = None
+        self._running = False
+        self.on_ac_control = None
+        self.on_connect_change = None
+
+    def start(self):
+        self._running = True
+        threading.Thread(target=self._server_loop, daemon=True).start()
+
+    def stop(self):
+        self._running = False
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+
+    def is_connected(self):
+        with self._lock:
+            return self._conn is not None
+
+    def send(self, obj: dict):
+        with self._lock:
+            conn = self._conn
+        if conn:
+            try:
+                conn.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+            except Exception:
+                pass
+
+    def _server_loop(self):
+        while self._running:
+            srv = None
+            try:
+                srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                srv.bind(("127.0.0.1", self.PORT))
+                srv.listen(1)
+                srv.settimeout(1.0)
+                while self._running:
+                    try:
+                        conn, _ = srv.accept()
+                        conn.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+                        with self._lock:
+                            self._conn = conn
+                        if self.on_connect_change:
+                            self.on_connect_change(True)
+                        self._handle_conn(conn)
+                    except _socket.timeout:
+                        continue
+                    except Exception:
+                        break
+            except Exception:
+                pass
+            finally:
+                with self._lock:
+                    self._conn = None
+                if srv:
+                    try:
+                        srv.close()
+                    except Exception:
+                        pass
+                if self.on_connect_change:
+                    self.on_connect_change(False)
+            time.sleep(1.0)
+
+    def _handle_conn(self, conn):
+        buf = ""
+        conn.settimeout(10.0)
+        try:
+            while self._running:
+                try:
+                    chunk = conn.recv(8192).decode("utf-8", errors="replace")
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            try:
+                                self._dispatch(json.loads(line))
+                            except (json.JSONDecodeError, KeyError):
+                                pass
+                except _socket.timeout:
+                    self.send({"type": "ping"})
+                except Exception:
+                    break
+        finally:
+            with self._lock:
+                if self._conn is conn:
+                    self._conn = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _dispatch(self, msg: dict):
+        t = msg.get("type")
+        if t == "ac_control":
+            if self.on_ac_control:
+                self.on_ac_control(msg)
+        elif t == "ping":
+            self.send({"type": "pong"})
+        elif t in ("inventory", "player", "chat", "pong"):
+            # Accepted for protocol compatibility; not required by clicker logic.
+            pass
 
 
 class IndicatorOverlay:
@@ -554,6 +672,10 @@ class AutoClicker:
 
         self._load_settings()
 
+        self.control_bridge = ControlBridge()
+        self.control_bridge.on_ac_control = self._on_ac_control
+        self.control_bridge.start()
+
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
         self.root.geometry("320x900")
@@ -577,6 +699,7 @@ class AutoClicker:
         self._build_gui()
         self._start_clicker_threads()
         self._install_hooks()
+        self.root.after(500, self._refresh_bridge_ui)
 
     def _load_settings(self):
         try:
@@ -633,6 +756,7 @@ class AutoClicker:
 
     def _on_close(self):
         self._save_settings()
+        self.control_bridge.stop()
         self.indicator.destroy()
         self.root.destroy()
 
@@ -643,6 +767,59 @@ class AutoClicker:
 
     def _current_rmb_cps(self) -> int:
         return self.rmb_cps
+
+    def _refresh_bridge_ui(self):
+        connected = self.control_bridge.is_connected()
+        self.bridge_status_var.set("Bridge: ● Connected" if connected else "Bridge: ○ Disconnected")
+        self._send_status_to_bridge()
+        self.root.after(400, self._refresh_bridge_ui)
+
+    def _send_status_to_bridge(self):
+        if self.control_bridge.is_connected():
+            self.control_bridge.send({
+                "type": "ac_status",
+                "active": self.globally_active,
+                "lmb_enabled": self.lmb_enabled,
+                "lmb_on": self.lmb_enabled and self.globally_active and self.lmb_running,
+                "lmb_cps": self._current_lmb_cps(),
+                "rmb_enabled": self.rmb_enabled,
+                "rmb_on": self.rmb_enabled and self.globally_active and self.rmb_running,
+                "rmb_cps": self._current_rmb_cps(),
+            })
+
+    def _on_ac_control(self, msg):
+        active = msg.get("active", None)
+        if active is not None:
+            self.globally_active = bool(active)
+            if not self.globally_active:
+                self.lmb_running = False
+                self.rmb_running = False
+
+        lmb_enabled = msg.get("lmb_enabled", None)
+        if lmb_enabled is not None:
+            self.lmb_enabled = bool(lmb_enabled)
+            if not self.lmb_enabled:
+                self.lmb_running = False
+
+        rmb_enabled = msg.get("rmb_enabled", None)
+        if rmb_enabled is not None:
+            self.rmb_enabled = bool(rmb_enabled)
+            if not self.rmb_enabled:
+                self.rmb_running = False
+
+        def apply_ui():
+            self.global_status_var.set("ACTIVE" if self.globally_active else "PAUSED")
+            self.lmb_status_var.set("ON" if self.lmb_enabled else "OFF")
+            self.lmb_btn.config(text="Disable" if self.lmb_enabled else "Enable")
+            self.rmb_status_var.set("ON" if self.rmb_enabled else "OFF")
+            self.rmb_btn.config(text="Disable" if self.rmb_enabled else "Enable")
+            if self.show_indicator:
+                self.indicator.set_active(self.globally_active)
+
+        try:
+            self.root.after(0, apply_ui)
+        except Exception:
+            pass
 
     def _build_gui(self):
         frame = ttk.Frame(self.root, padding=15)
@@ -798,6 +975,14 @@ class AutoClicker:
         self.win_combo.pack(side="left", fill="x", expand=True, padx=(0, 5))
         self.win_combo.bind("<<ComboboxSelected>>", self._on_win_selected)
         ttk.Button(win_pick_row, text="↻", width=3, command=self._refresh_window_list).pack(side="right")
+
+        bridge_frame = ttk.LabelFrame(frame, text="Control bridge", padding=10)
+        bridge_frame.pack(fill="x", pady=(0, 8))
+        self.bridge_status_var = tk.StringVar(value="Bridge: ○ Disconnected")
+        ttk.Label(
+            bridge_frame, textvariable=self.bridge_status_var,
+            foreground="gray", font=("Segoe UI", 8)
+        ).pack(anchor="w")
 
         # --- Indicator toggle ---
         self.indicator_var = tk.BooleanVar(value=self.show_indicator)
