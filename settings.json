@@ -1,13 +1,13 @@
 {
-  "lmb_cps": 20,
-  "rmb_cps": 50,
+  "lmb_cps": 60,
+  "rmb_cps": 100,
   "toggle_vk": 164,
-  "lmb_smart": true,
-  "lmb_min_cps": 15,
+  "lmb_smart": false,
+  "lmb_min_cps": 20,
   "lmb_max_cps": 25,
-  "lmb_jitter_ms": 10,
+  "lmb_jitter_ms": 5,
   "lmb_preset": "Custom",
-  "show_indicator": false,
+  "show_indicator": true,
   "indicator_x": 1090,
   "indicator_y": 1284,
   "indicator_shape": "line",
@@ -15,5 +15,8 @@
   "indicator_line_width": 20,
   "indicator_line_length": 176,
   "indicator_blink": true,
-  "indicator_text_size": 35
+  "indicator_text_size": 35,
+  "target_window_enabled": true,
+  "target_process": "javaw.exe",
+  "target_window_title": "Minecraft* 1.21.11 - Multiplayer (3rd-party Server)  (javaw.exe)"
 }

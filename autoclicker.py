@@ -7,6 +7,7 @@ from tkinter import ttk
 import json
 import os
 import random
+import sys
 
 # Windows API
 user32 = ctypes.windll.user32
@@ -54,6 +55,36 @@ user32.SetLayeredWindowAttributes.argtypes = [
     wintypes.HWND, wintypes.COLORREF, ctypes.c_byte, wintypes.DWORD
 ]
 
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
+
+user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowTextW.restype = ctypes.c_int
+
+WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+user32.EnumWindows.restype = wintypes.BOOL
+
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
@@ -68,8 +99,15 @@ WM_RBUTTONUP = 0x0205
 WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104
 LLMHF_INJECTED = 0x00000001
+LLKHF_INJECTED = 0x00000010
+WM_KEYUP = 0x0101
+WM_SYSKEYUP = 0x0105
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_FILE = os.path.join(_BASE_DIR, "settings.json")
 
 HOOKPROC = ctypes.CFUNCTYPE(
     ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
@@ -487,7 +525,7 @@ class AutoClicker:
         self.globally_active = True
         self.toggle_vk = self.DEFAULT_TOGGLE_VK
         self.show_indicator = False
-        self._binding_mode = False
+        self._binding_mode = None
 
         # Smart LMB settings
         self.lmb_smart = False
@@ -506,11 +544,19 @@ class AutoClicker:
         self.indicator_blink = True
         self.indicator_text_size = 16
 
+        # Window lock settings
+        self.target_window_enabled = False
+        self.target_process = ""
+        self.target_window_title = ""
+        self._target_cache_time = 0.0
+        self._target_cache_result = True
+        self._window_entries = []
+
         self._load_settings()
 
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
-        self.root.geometry("320x740")
+        self.root.geometry("320x900")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -553,6 +599,9 @@ class AutoClicker:
             self.indicator_line_length = s.get("indicator_line_length", 40)
             self.indicator_blink = s.get("indicator_blink", True)
             self.indicator_text_size = s.get("indicator_text_size", 16)
+            self.target_window_enabled = s.get("target_window_enabled", False)
+            self.target_process = s.get("target_process", "")
+            self.target_window_title = s.get("target_window_title", "")
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -575,6 +624,9 @@ class AutoClicker:
             "indicator_line_length": self.indicator_line_length,
             "indicator_blink": self.indicator_blink,
             "indicator_text_size": self.indicator_text_size,
+            "target_window_enabled": self.target_window_enabled,
+            "target_process": self.target_process,
+            "target_window_title": self.target_window_title,
         }
         with open(SETTINGS_FILE, "w") as f:
             json.dump(s, f, indent=2)
@@ -583,6 +635,14 @@ class AutoClicker:
         self._save_settings()
         self.indicator.destroy()
         self.root.destroy()
+
+    def _current_lmb_cps(self) -> int:
+        if self.lmb_smart:
+            return (self.lmb_min_cps + self.lmb_max_cps) // 2
+        return self.lmb_cps
+
+    def _current_rmb_cps(self) -> int:
+        return self.rmb_cps
 
     def _build_gui(self):
         frame = ttk.Frame(self.root, padding=15)
@@ -717,6 +777,27 @@ class AutoClicker:
         self.bind_hint_var = tk.StringVar(value="")
         self.bind_hint = ttk.Label(bind_row, textvariable=self.bind_hint_var, foreground="gray")
         self.bind_hint.pack(side="right")
+
+        # --- Window lock section ---
+        win_frame = ttk.LabelFrame(frame, text="Window lock", padding=10)
+        win_frame.pack(fill="x", pady=(0, 8))
+
+        self.win_lock_var = tk.BooleanVar(value=self.target_window_enabled)
+        ttk.Checkbutton(
+            win_frame, text="Only run in selected window",
+            variable=self.win_lock_var, command=self._on_win_lock_toggle
+        ).pack(anchor="w")
+
+        win_pick_row = ttk.Frame(win_frame)
+        win_pick_row.pack(fill="x", pady=(4, 0))
+        self.win_combo_var = tk.StringVar(value=self.target_window_title or "")
+        self.win_combo = ttk.Combobox(
+            win_pick_row, textvariable=self.win_combo_var,
+            state="readonly", width=22
+        )
+        self.win_combo.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.win_combo.bind("<<ComboboxSelected>>", self._on_win_selected)
+        ttk.Button(win_pick_row, text="↻", width=3, command=self._refresh_window_list).pack(side="right")
 
         # --- Indicator toggle ---
         self.indicator_var = tk.BooleanVar(value=self.show_indicator)
@@ -906,18 +987,24 @@ class AutoClicker:
         )
         self._save_settings()
 
-    def _start_binding(self):
-        self._binding_mode = True
-        self.bind_var.set("...")
-        self.bind_hint_var.set("Press any key")
-        self.bind_btn.config(state="disabled")
+    def _start_binding(self, target="toggle"):
+        if self._binding_mode:
+            return
+        self._binding_mode = target
+        if target == "toggle":
+            self.bind_var.set("...")
+            self.bind_hint_var.set("Press any key")
+            self.bind_btn.config(state="disabled")
 
     def _finish_binding(self, vk):
-        self._binding_mode = False
-        self.toggle_vk = vk
-        self.root.after(0, lambda: self.bind_var.set(vk_to_name(vk)))
-        self.root.after(0, lambda: self.bind_hint_var.set(""))
-        self.root.after(0, lambda: self.bind_btn.config(state="normal"))
+        target = self._binding_mode
+        self._binding_mode = None
+        name = vk_to_name(vk) if vk else "—"
+        if target == "toggle":
+            self.toggle_vk = vk
+            self.root.after(0, lambda: self.bind_var.set(name))
+            self.root.after(0, lambda: self.bind_hint_var.set(""))
+            self.root.after(0, lambda: self.bind_btn.config(state="normal"))
         self._save_settings()
 
     def _update_lmb_mode_widgets(self):
@@ -1027,14 +1114,18 @@ class AutoClicker:
         self._mouse_hook_cb = HOOKPROC(mouse_hook_proc)
 
         def kb_hook_proc(nCode, wParam, lParam):
-            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            if nCode >= 0:
                 info = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 vk = info.vkCode
+                is_injected = bool(info.flags & LLKHF_INJECTED)
 
-                if self._binding_mode:
-                    self._finish_binding(vk)
-                elif vk == self.toggle_vk:
-                    self._toggle_global()
+                if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN) and not is_injected:
+                    if self._binding_mode:
+                        self._finish_binding(vk)
+                        return 1
+                    elif vk == self.toggle_vk:
+                        self._toggle_global()
+                    # Otherwise — no special hotkeys (BedWars removed).
 
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
@@ -1054,7 +1145,7 @@ class AutoClicker:
     def _start_clicker_threads(self):
         def lmb_loop():
             while True:
-                if self.lmb_running and self.lmb_enabled and self.globally_active:
+                if self.lmb_running and self.lmb_enabled and self.globally_active and self._is_target_active():
                     click_left()
                     if self.lmb_smart:
                         # Pick random CPS within the range
@@ -1071,7 +1162,7 @@ class AutoClicker:
 
         def rmb_loop():
             while True:
-                if self.rmb_running and self.rmb_enabled and self.globally_active:
+                if self.rmb_running and self.rmb_enabled and self.globally_active and self._is_target_active():
                     click_right()
                     time.sleep(1.0 / self.rmb_cps)
                 else:
@@ -1079,6 +1170,94 @@ class AutoClicker:
 
         threading.Thread(target=lmb_loop, daemon=True).start()
         threading.Thread(target=rmb_loop, daemon=True).start()
+
+    def _get_window_list(self):
+        """Enumerate visible top-level windows, return list of (display_text, exe_name)."""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        windows = []
+        seen_exes = set()
+
+        def enum_cb(hwnd, _):
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length == 0:
+                    return True
+                title_buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, title_buf, length + 1)
+                title = title_buf.value
+
+                pid = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not h_proc:
+                    return True
+                path_buf = ctypes.create_unicode_buffer(512)
+                size = wintypes.DWORD(512)
+                kernel32.QueryFullProcessImageNameW(h_proc, 0, path_buf, ctypes.byref(size))
+                kernel32.CloseHandle(h_proc)
+                exe = os.path.basename(path_buf.value)
+                if exe and exe not in seen_exes:
+                    seen_exes.add(exe)
+                    windows.append((f"{title}  ({exe})", exe))
+            except Exception:
+                pass
+            return True
+
+        cb = WNDENUMPROC(enum_cb)
+        user32.EnumWindows(cb, 0)
+        return windows
+
+    def _refresh_window_list(self):
+        wins = self._get_window_list()
+        self._window_entries = wins
+        self.win_combo["values"] = [w[0] for w in wins]
+        if self.target_process:
+            for i, (_, exe) in enumerate(wins):
+                if exe.lower() == self.target_process.lower():
+                    self.win_combo.current(i)
+                    self.win_combo_var.set(wins[i][0])
+                    break
+
+    def _on_win_selected(self, event=None):
+        idx = self.win_combo.current()
+        if 0 <= idx < len(self._window_entries):
+            disp, exe = self._window_entries[idx]
+            self.target_process = exe
+            self.target_window_title = disp
+            self._save_settings()
+
+    def _on_win_lock_toggle(self):
+        self.target_window_enabled = self.win_lock_var.get()
+        self._save_settings()
+
+    def _is_target_active(self):
+        if not self.target_window_enabled or not self.target_process:
+            return True
+        now = time.time()
+        if now - self._target_cache_time < 0.05:
+            return self._target_cache_result
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        result = False
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                pid = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value:
+                    h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                    if h_proc:
+                        path_buf = ctypes.create_unicode_buffer(512)
+                        size = wintypes.DWORD(512)
+                        kernel32.QueryFullProcessImageNameW(h_proc, 0, path_buf, ctypes.byref(size))
+                        kernel32.CloseHandle(h_proc)
+                        result = os.path.basename(path_buf.value).lower() == self.target_process.lower()
+        except Exception:
+            result = False
+        self._target_cache_time = now
+        self._target_cache_result = result
+        return result
 
     def run(self):
         self.root.mainloop()
