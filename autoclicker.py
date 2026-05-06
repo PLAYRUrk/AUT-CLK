@@ -672,9 +672,9 @@ class AutoClicker:
 
         self._load_settings()
 
-        self.control_bridge = ControlBridge()
-        self.control_bridge.on_ac_control = self._on_ac_control
-        self.control_bridge.start()
+        self.bridge_enabled = True  # default: enabled
+        self.control_bridge = None
+        self._start_bridge()
 
         self.root = tk.Tk()
         self.root.title("AUT-CLK")
@@ -756,7 +756,7 @@ class AutoClicker:
 
     def _on_close(self):
         self._save_settings()
-        self.control_bridge.stop()
+        self._stop_bridge()
         self.indicator.destroy()
         self.root.destroy()
 
@@ -768,14 +768,41 @@ class AutoClicker:
     def _current_rmb_cps(self) -> int:
         return self.rmb_cps
 
+    def _start_bridge(self):
+        if self.control_bridge is None:
+            self.control_bridge = ControlBridge()
+            self.control_bridge.on_ac_control = self._on_ac_control
+        self.control_bridge.start()
+
+    def _stop_bridge(self):
+        if self.control_bridge is not None:
+            try:
+                self.control_bridge.stop()
+            except Exception:
+                pass
+
+    def _toggle_bridge(self):
+        self.bridge_enabled = not self.bridge_enabled
+        if self.bridge_enabled:
+            self._start_bridge()
+            if hasattr(self, "bridge_toggle_btn"):
+                self.bridge_toggle_btn.config(text="Disable")
+        else:
+            self._stop_bridge()
+            if hasattr(self, "bridge_toggle_btn"):
+                self.bridge_toggle_btn.config(text="Enable")
+
     def _refresh_bridge_ui(self):
-        connected = self.control_bridge.is_connected()
-        self.bridge_status_var.set("Bridge: ● Connected" if connected else "Bridge: ○ Disconnected")
-        self._send_status_to_bridge()
+        if not self.bridge_enabled:
+            self.bridge_status_var.set("Bridge: OFF")
+        else:
+            connected = self.control_bridge is not None and self.control_bridge.is_connected()
+            self.bridge_status_var.set("Bridge: ● Connected" if connected else "Bridge: ○ Disconnected")
+            self._send_status_to_bridge()
         self.root.after(400, self._refresh_bridge_ui)
 
     def _send_status_to_bridge(self):
-        if self.control_bridge.is_connected():
+        if self.bridge_enabled and self.control_bridge is not None and self.control_bridge.is_connected():
             self.control_bridge.send({
                 "type": "ac_status",
                 "active": self.globally_active,
@@ -788,6 +815,8 @@ class AutoClicker:
             })
 
     def _on_ac_control(self, msg):
+        if not self.bridge_enabled:
+            return
         active = msg.get("active", None)
         if active is not None:
             self.globally_active = bool(active)
@@ -978,11 +1007,19 @@ class AutoClicker:
 
         bridge_frame = ttk.LabelFrame(frame, text="Control bridge", padding=10)
         bridge_frame.pack(fill="x", pady=(0, 8))
+        top_row = ttk.Frame(bridge_frame)
+        top_row.pack(fill="x")
+
         self.bridge_status_var = tk.StringVar(value="Bridge: ○ Disconnected")
         ttk.Label(
             bridge_frame, textvariable=self.bridge_status_var,
             foreground="gray", font=("Segoe UI", 8)
-        ).pack(anchor="w")
+        ).pack(in_=top_row, side="left", anchor="w")
+
+        self.bridge_toggle_btn = ttk.Button(
+            top_row, text="Disable", width=8, command=self._toggle_bridge
+        )
+        self.bridge_toggle_btn.pack(side="right")
 
         # --- Indicator toggle ---
         self.indicator_var = tk.BooleanVar(value=self.show_indicator)
